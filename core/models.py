@@ -145,28 +145,31 @@ class ItemVenda(models.Model):
 
     def save(self, *args, **kwargs):
 
-        # Verifica estoque
-        if self.quantidade > self.produto.estoque:
+        if self.pk:
+            # Já existe (edição)
+            item_antigo = ItemVenda.objects.get(pk=self.pk)
+            diferenca = self.quantidade - item_antigo.quantidade
+        else:
+            # Novo item
+            diferenca = self.quantidade
+
+        if diferenca > 0 and diferenca > self.produto.estoque:
             raise ValidationError("Estoque insuficiente.")
 
         # Define preço automático
         if not self.preco_unitario:
             self.preco_unitario = self.produto.preco_venda
 
-        # Calcula total do item
         self.total_item = self.quantidade * self.preco_unitario
 
         super().save(*args, **kwargs)
 
-        # Dá baixa no estoque
-        self.produto.estoque -= self.quantidade
+        # Atualiza estoque corretamente
+        self.produto.estoque -= diferenca
         self.produto.save()
 
         # Atualiza totais da venda
         self.venda.atualizar_totais()
-
-    def __str__(self):
-        return f"{self.produto.nome} - {self.quantidade}"
 
 
 # ==========================
