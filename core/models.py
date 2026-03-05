@@ -1,5 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+from django.db.models import Sum
 
 
 # ==========================
@@ -13,7 +15,7 @@ class Produto(models.Model):
     preco_venda = models.DecimalField(max_digits=10, decimal_places=2)
     preco_custo = models.DecimalField(max_digits=10, decimal_places=2)
 
-    estoque = models.IntegerField(default=0)
+    estoque = models.PositiveIntegerField(default=0)
     ativo = models.BooleanField(default=True)
 
     criado_em = models.DateTimeField(auto_now_add=True)
@@ -43,7 +45,7 @@ class Fornecedor(models.Model):
 # ==========================
 class Compra(models.Model):
 
-    fornecedor = models.ForeignKey(Fornecedor, on_delete=models.PROTECT)
+    fornecedor = models.ForeignKey(Fornecedor, on_delete=models.PROTECT, null=True, blank=True)
     data = models.DateTimeField(auto_now_add=True)
     valor_total = models.DecimalField(max_digits=12, decimal_places=2)
 
@@ -55,7 +57,7 @@ class ItemCompra(models.Model):
 
     compra = models.ForeignKey(Compra, on_delete=models.CASCADE)
     produto = models.ForeignKey(Produto, on_delete=models.PROTECT)
-    quantidade = models.IntegerField()
+    quantidade = models.PositiveIntegerField()
     preco_custo_unitario = models.DecimalField(max_digits=10, decimal_places=2)
 
     def __str__(self):
@@ -110,6 +112,21 @@ class Venda(models.Model):
 
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='ABERTA')
 
+    def atualizar_totais(self):
+        subtotal = self.itens.aggregate(
+            total=Sum('total_item')
+        )['total'] or 0
+
+        self.subtotal = subtotal
+
+        if self.desconto_percentual:
+            desconto = subtotal * (self.desconto_percentual / 100)
+            self.total_final = subtotal - desconto
+        else:
+            self.total_final = subtotal - self.desconto_valor
+
+        self.save(update_fields=['subtotal', 'total_final'])
+
     def __str__(self):
         return f"Venda {self.id} - {self.status}"
 
@@ -119,12 +136,34 @@ class Venda(models.Model):
 # ==========================
 class ItemVenda(models.Model):
 
-    venda = models.ForeignKey(Venda, on_delete=models.CASCADE)
+    venda = models.ForeignKey(Venda, on_delete=models.CASCADE, related_name='itens')
     produto = models.ForeignKey(Produto, on_delete=models.PROTECT)
 
-    quantidade = models.IntegerField()
+    quantidade = models.PositiveIntegerField()
     preco_unitario = models.DecimalField(max_digits=10, decimal_places=2)
-    total_item = models.DecimalField(max_digits=12, decimal_places=2)
+    total_item = models.DecimalField(max_digits=12, decimal_places=2, blank=True)
+
+    def save(self, *args, **kwargs):
+
+        # Verifica estoque
+        if self.quantidade > self.produto.estoque:
+            raise ValidationError("Estoque insuficiente.")
+
+        # Define preço automático
+        if not self.preco_unitario:
+            self.preco_unitario = self.produto.preco_venda
+
+        # Calcula total do item
+        self.total_item = self.quantidade * self.preco_unitario
+
+        super().save(*args, **kwargs)
+
+        # Dá baixa no estoque
+        self.produto.estoque -= self.quantidade
+        self.produto.save()
+
+        # Atualiza totais da venda
+        self.venda.atualizar_totais()
 
     def __str__(self):
         return f"{self.produto.nome} - {self.quantidade}"

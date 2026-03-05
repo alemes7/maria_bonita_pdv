@@ -88,3 +88,4 @@ class CaixaAdmin(admin.ModelAdmin):
 class FormaPagamentoAdmin(admin.ModelAdmin):
     list_display = ('id', 'nome', 'ativo')
     list_filter = ('ativo',)
+
