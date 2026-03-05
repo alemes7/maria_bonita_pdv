@@ -50,7 +50,7 @@ class Compra(models.Model):
     valor_total = models.DecimalField(max_digits=12, decimal_places=2)
 
     def __str__(self):
-        return f"Compra {self.id} - {self.fornecedor.nome}"
+        return f"Compra {self.id} - {self.fornecedor.nome if self.fornecedor else 'Sem fornecedor'}"
 
 
 class ItemCompra(models.Model):
@@ -85,6 +85,15 @@ class Caixa(models.Model):
     usuario_abertura = models.ForeignKey(User, on_delete=models.PROTECT, related_name='caixa_abertura')
     usuario_fechamento = models.ForeignKey(User, on_delete=models.PROTECT, related_name='caixa_fechamento', blank=True, null=True)
 
+    def save(self, *args, **kwargs):
+        # Validar que não há outra caixa aberta
+        if self.status == 'ABERTO':
+            caixa_aberta = Caixa.objects.filter(status='ABERTO').exclude(pk=self.pk).exists()
+            if caixa_aberta:
+                raise ValidationError("Já existe um caixa aberto. Feche o caixa anterior antes de abrir um novo.")
+        
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Caixa {self.id} - {self.status}"
 
@@ -104,13 +113,27 @@ class Venda(models.Model):
     usuario = models.ForeignKey(User, on_delete=models.PROTECT)
     data = models.DateTimeField(auto_now_add=True)
 
-    subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     desconto_valor = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     desconto_percentual = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
-    total_final = models.DecimalField(max_digits=12, decimal_places=2)
+    total_final = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='ABERTA')
+
+    def save(self, *args, **kwargs):
+        # Validar quando finalizar a venda
+        if self.status == 'FINALIZADA':
+            # Verificar se caixa está aberto
+            if self.caixa.status != 'ABERTO':
+                raise ValidationError("O caixa deve estar aberto para finalizar uma venda.")
+            
+            # Verificar se há pagamento registrado
+            pagamentos = PagamentoVenda.objects.filter(venda=self).aggregate(total=Sum('valor'))['total'] or 0
+            if pagamentos < self.total_final:
+                raise ValidationError(f"Pagamento insuficiente. Faltam R$ {self.total_final - pagamentos:.2f}")
+        
+        super().save(*args, **kwargs)
 
     def atualizar_totais(self):
         subtotal = self.itens.aggregate(
@@ -141,9 +164,12 @@ class ItemVenda(models.Model):
 
     quantidade = models.PositiveIntegerField()
     preco_unitario = models.DecimalField(max_digits=10, decimal_places=2)
-    total_item = models.DecimalField(max_digits=12, decimal_places=2, blank=True)
+    total_item = models.DecimalField(max_digits=12, decimal_places=2)
 
     def save(self, *args, **kwargs):
+
+        if self.venda.status == 'FINALIZADA':
+            raise ValidationError("Não é possível editar itens de uma venda finalizada.")
 
         if self.pk:
             # Já existe (edição)
@@ -171,6 +197,20 @@ class ItemVenda(models.Model):
         # Atualiza totais da venda
         self.venda.atualizar_totais()
 
+    def delete(self, *args, **kwargs):
+        if self.venda.status == 'FINALIZADA':
+            raise ValidationError("Não é possível excluir itens de uma venda finalizada.")
+
+        self.produto.estoque += self.quantidade
+        self.produto.save()
+
+        super().delete(*args, **kwargs)
+
+        self.venda.atualizar_totais()
+
+    def __str__(self):
+        return f"{self.produto.nome} - {self.quantidade}"
+
 
 # ==========================
 # FORMA DE PAGAMENTO
@@ -192,6 +232,16 @@ class PagamentoVenda(models.Model):
     venda = models.ForeignKey(Venda, on_delete=models.CASCADE)
     forma_pagamento = models.ForeignKey(FormaPagamento, on_delete=models.PROTECT)
     valor = models.DecimalField(max_digits=12, decimal_places=2)
+
+    def save(self, *args, **kwargs):
+        if self.venda.status == 'FINALIZADA':
+            raise ValidationError("Não é possível alterar pagamentos de uma venda finalizada.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.venda.status == 'FINALIZADA':
+            raise ValidationError("Não é possível excluir pagamentos de uma venda finalizada.")
+        super().delete(*args, **kwargs)
 
     def __str__(self):
         return f"{self.venda.id} - {self.forma_pagamento.nome}"
